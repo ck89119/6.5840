@@ -188,8 +188,8 @@ func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	term := rf.currentTerm
-	rf.mu.Unlock()
 	DPrintf("[%d] startElection at term: %d\n", rf.me, rf.currentTerm)
+	rf.mu.Unlock()
 
 	ch := make(chan bool)
 	for i := range rf.peers {
@@ -198,7 +198,7 @@ func (rf *Raft) startElection() {
 		}
 		go func(index int) {
 			args := RequestVoteArgs{
-				Term:        rf.currentTerm,
+				Term:        term,
 				CandidateId: rf.me,
 				//	LastLogIndex:
 				//  LastLogTerm:
@@ -242,14 +242,23 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) heartBeat() {
+	term := rf.currentTerm
+
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(index int) {
-			for rf.state == LEADER {
+			for {
+				rf.mu.Lock()
+				state := rf.state
+				rf.mu.Unlock()
+				if state != LEADER {
+					break
+				}
+
 				args := AppendEntriesArgs{
-					Term:     rf.currentTerm,
+					Term:     term,
 					LeaderId: rf.me,
 				}
 				reply := AppendEntriesReply{}
@@ -281,10 +290,10 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf("[%d] receive heart beat from: %d, currentTerm: %d, args.Term: %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	DPrintf("[%d] receive heart beat from: %d, currentTerm: %d, args.Term: %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
