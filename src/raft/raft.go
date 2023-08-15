@@ -69,10 +69,11 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state       State
+	state         State
+	lastHeartBeat time.Time
+
 	currentTerm int
 	votedFor    int
-	heartBeaten bool
 	log         []*LogEntry
 }
 
@@ -175,6 +176,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+	rf.lastHeartBeat = time.Now()
 	rf.currentTerm = args.Term
 	rf.votedFor = args.CandidateId
 	// TODO logTerm and logIndex
@@ -185,6 +187,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.state = CANDIDATE
+	rf.lastHeartBeat = time.Now()
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	term := rf.currentTerm
@@ -294,6 +297,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	DPrintf("[%d] receive heart beat from: %d, currentTerm: %d, args.Term: %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+	rf.lastHeartBeat = time.Now()
 
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
@@ -309,7 +313,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.currentTerm < args.Term {
 			rf.currentTerm = args.Term
 		}
-		rf.heartBeaten = true
 
 		reply.Term = rf.currentTerm
 		reply.Success = true
@@ -405,11 +408,11 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		rf.mu.Lock()
 
-		DPrintf("[%d] state: %v, heartBeaten: %v\n", rf.me, rf.state, rf.heartBeaten)
-		if rf.state != LEADER && !rf.heartBeaten {
+		duration := time.Now().Sub(rf.lastHeartBeat)
+		DPrintf("[%d] state: %v, duration from last heartBeaten: %v (ms)\n", rf.me, rf.state, duration)
+		if rf.state != LEADER && duration > time.Duration(ms)*time.Millisecond {
 			go rf.startElection()
 		}
-		rf.heartBeaten = false
 
 		rf.mu.Unlock()
 	}
@@ -436,7 +439,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.heartBeaten = false
+	rf.lastHeartBeat = time.Now()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
