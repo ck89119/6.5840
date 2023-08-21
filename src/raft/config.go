@@ -194,6 +194,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		log.Fatalf("snapshot decode error")
 		return "snapshot Decode() error"
 	}
+	DPrintf("ingestSnap lastIncludedIndex = %v\n", lastIncludedIndex)
 	if index != -1 && index != lastIncludedIndex {
 		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
 		return err
@@ -218,6 +219,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	}
 
 	for m := range applyCh {
+		DPrintf("<%d> receive ApplyMsg: %s\n", i, m)
 		err_msg := ""
 		if m.SnapshotValid {
 			cfg.mu.Lock()
@@ -250,7 +252,9 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				for j := 0; j <= m.CommandIndex; j++ {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
+				DPrintf("<%d> xlog = %v\n", i, xlog)
 				e.Encode(xlog)
+				DPrintf("<%d> applierSnap call Snapshot, index = %v\n", i, m.CommandIndex)
 				rf.Snapshot(m.CommandIndex, w.Bytes())
 			}
 		} else {
@@ -496,6 +500,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
+		//DPrintf("i = %d, ok = %v\n", i, ok)
 
 		if ok {
 			if count > 0 && cmd != cmd1 {
@@ -575,7 +580,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-		DPrintf("leader id: %d, log index: %d\n", starts, index)
+		DPrintf("leader id: %d, log index: %d, cmd: %v\n", starts, index, cmd)
 
 		if index != -1 {
 			// somebody claimed to be the leader and to have
