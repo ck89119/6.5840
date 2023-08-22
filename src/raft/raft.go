@@ -664,36 +664,34 @@ func (rf *Raft) fastBackUp(reply *AppendEntriesReply) int {
 }
 
 func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
-	DPrintf("[%d]:[%d] lastMatchedIndex = %v, rf.matchIndex[%d] = %v\n",
-		rf.me, rf.currentTerm, lastMatchedIndex, server, rf.matchIndex[server])
+	DPrintf("[%d]:[%d] lastMatchedIndex = %d, rf.nextIndex[%d] = %d, rf.matchIndex[%d] = %d\n",
+		rf.me, rf.currentTerm, lastMatchedIndex, server, rf.nextIndex[server], server, rf.matchIndex[server])
 
-	if lastMatchedIndex > rf.matchIndex[server] {
-		rf.nextIndex[server] = lastMatchedIndex + 1
-		rf.matchIndex[server] = lastMatchedIndex
+	rf.nextIndex[server] = Max(rf.nextIndex[server], lastMatchedIndex+1)
+	rf.matchIndex[server] = Max(rf.matchIndex[server], lastMatchedIndex)
 
-		DPrintf("[%d]:[%d] lastMatchedIndex = %v, commitIndex = %v, nextIndex = %v, matchIndex = %v\n",
-			rf.me, term, lastMatchedIndex, rf.commitIndex, rf.nextIndex, rf.matchIndex)
-		for n := lastMatchedIndex; n > rf.commitIndex; n-- {
-			if rf.log[n-rf.snapshotIndex].Term != term {
-				DPrintf("[%d]:[%d] rf.log[%d].Term = %v\n", rf.me, term, n, rf.log[n-rf.snapshotIndex].Term)
+	DPrintf("[%d]:[%d] lastMatchedIndex = %v, commitIndex = %v, nextIndex = %v, matchIndex = %v\n",
+		rf.me, term, lastMatchedIndex, rf.commitIndex, rf.nextIndex, rf.matchIndex)
+	for n := rf.matchIndex[server]; n > rf.commitIndex; n-- {
+		if rf.log[n-rf.snapshotIndex].Term != term {
+			DPrintf("[%d]:[%d] rf.log[%d].Term = %v\n", rf.me, term, n, rf.log[n-rf.snapshotIndex].Term)
+			continue
+		}
+
+		count := 1
+		for i, matchIndex := range rf.matchIndex {
+			if i == rf.me {
 				continue
 			}
-
-			count := 1
-			for i, matchIndex := range rf.matchIndex {
-				if i == rf.me {
-					continue
-				}
-				if matchIndex >= n {
-					count++
-				}
+			if matchIndex >= n {
+				count++
 			}
-			if count > len(rf.peers)/2 {
-				DPrintf("[%d]:[%d] find n = %d bigger than commitIndex(%d) with majority\n", rf.me, term, n, rf.commitIndex)
-				rf.commitIndex = n
-				rf.applyCommand()
-				break
-			}
+		}
+		if count > len(rf.peers)/2 {
+			DPrintf("[%d]:[%d] find n = %d bigger than commitIndex(%d) with majority\n", rf.me, term, n, rf.commitIndex)
+			rf.commitIndex = n
+			rf.applyCommand()
+			break
 		}
 	}
 }
@@ -876,6 +874,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.snapshotIndex = 0
 
 	// initialize from state persisted before a crash
+	rf.snapshot = persister.ReadSnapshot()
 	rf.readPersist(persister.ReadRaftState())
 
 	rf.commitIndex = rf.snapshotIndex

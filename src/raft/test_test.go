@@ -1156,7 +1156,8 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		if disconnect {
 			cfg.disconnect(victim)
-			cfg.one(rand.Int(), servers-1, true)
+			cfg.one(counter, servers-1, true)
+			counter++
 		}
 		if crash {
 			cfg.crash1(victim)
@@ -1164,8 +1165,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		// perhaps send enough to get a snapshot
-		nn := SnapShotInterval
-		//nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
 			cfg.rafts[sender].Start(counter) // 2..11
 			counter++
@@ -1181,7 +1181,8 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			counter++
 			DPrintf("one over\n")
 		} else {
-			cfg.one(rand.Int(), servers-1, true)
+			cfg.one(counter, servers-1, true)
+			counter++
 		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
@@ -1189,9 +1190,10 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		if disconnect {
 			// reconnect a follower, who maybe behind and
-			// needs to rceive a snapshot to catch up.
+			// needs to receive a snapshot to catch up.
 			cfg.connect(victim)
-			cfg.one(rand.Int(), servers, true)
+			cfg.one(counter, servers, true)
+			counter++
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
@@ -1274,13 +1276,17 @@ func TestSnapshotInit2D(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2D): snapshot initialization after crash")
-	cfg.one(rand.Int(), servers, true)
+	counter := 1
+	cfg.one(counter, servers, true) // 1
+	counter++
 
 	// enough ops to make a snapshot
 	nn := SnapShotInterval + 1
 	for i := 0; i < nn; i++ {
-		cfg.one(rand.Int(), servers, true)
+		cfg.one(counter, servers, true) // 2..12
+		counter++
 	}
+	DPrintf("nn = %d\n", nn)
 
 	// crash all
 	for i := 0; i < servers; i++ {
@@ -1292,14 +1298,11 @@ func TestSnapshotInit2D(t *testing.T) {
 		cfg.start1(i, cfg.applierSnap)
 		cfg.connect(i)
 	}
+	DPrintf("round 1 over\n")
 
 	// a single op, to get something to be written back to persistent storage.
-	cfg.one(rand.Int(), servers, true)
-
-	// crash all
-	for i := 0; i < servers; i++ {
-		cfg.crash1(i)
-	}
+	cfg.one(counter, servers, true) // 13
+	counter++
 
 	// revive all
 	for i := 0; i < servers; i++ {
