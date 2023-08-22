@@ -115,6 +115,18 @@ type Raft struct {
 	applyCh chan ApplyMsg
 }
 
+func (rf *Raft) lowerBound(term int) int {
+	return sort.Search(len(rf.log), func(i int) bool {
+		return rf.log[i].Term >= term
+	})
+}
+
+func (rf *Raft) upperBound(term int) int {
+	return sort.Search(len(rf.log), func(i int) bool {
+		return rf.log[i].Term > term
+	})
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -223,6 +235,10 @@ func (rf *Raft) installSnapshot(server int, term int) {
 
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term, true)
+	}
+
+	if rf.state != LEADER || rf.currentTerm != term {
+		DPrintf("[%d] not Leader any more, stop heartBeat\n", rf.me)
 		return
 	}
 
@@ -477,16 +493,19 @@ type AppendEntriesArgs struct {
 }
 
 func (args *AppendEntriesArgs) String() string {
-	return fmt.Sprintf("{Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, len(enties) = %d, LeaderCommit = %d}",
+	return fmt.Sprintf("{Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, len(entries) = %d, LeaderCommit = %d}",
 		args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
 }
 
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
-	XTerm   int
-	XIndex  int
-	XLen    int
+	// XTerm: term in the conflicting entry (if any)
+	XTerm int
+	// XIndex: index of first entry with that term (if any)
+	XIndex int
+	// XLen: log length
+	XLen int
 }
 
 func (reply *AppendEntriesReply) String() string {
@@ -554,23 +573,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.state = FOLLOWER
 
 	args.PrevLogIndex -= rf.snapshotIndex
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		DPrintf("[%d]:[%d] PrevLogIndex or PrevLogTerm not match\n", rf.me, rf.currentTerm)
-		reply.Success = false
+	if args.PrevLogIndex >= len(rf.log) {
+		DPrintf("[%d]:[%d] follower's log is too short, PrevLogIndex = %d, len(rf.log) = %d\n",
+			rf.me, rf.currentTerm, args.PrevLogIndex, len(rf.log))
 
-		if args.PrevLogIndex < len(rf.log) {
-			DPrintf("[%d]:[%d] log[PrevLogIndex].Term: %d\n", rf.me, rf.currentTerm, rf.log[args.PrevLogIndex].Term)
-			reply.XTerm = rf.log[args.PrevLogIndex].Term
-			for reply.XIndex = args.PrevLogIndex; reply.XIndex >= 0 && rf.log[reply.XIndex].Term == reply.XTerm; reply.XIndex-- {
-			}
-			reply.XIndex = reply.XIndex + 1 + rf.snapshotIndex
-			reply.XLen = -1
-		} else {
-			DPrintf("[%d]:[%d] lastLog.Index = %d\n", rf.me, rf.currentTerm, rf.getLastLog().Index)
-			reply.Term = -1
-			reply.XIndex = -1
-			reply.XLen = rf.getLastLog().Index + 1
+		reply.Success = false
+		reply.XTerm = -1
+		reply.XIndex = -1
+		reply.XLen = rf.getLastLog().Index + 1
+
+		if needPersist {
+			rf.persist()
 		}
+		return
+	}
+
+	if args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		DPrintf("[%d]:[%d] PrevLogTerm not match, args.PrevLogTerm = %d, rf.log[args.PrevLogIndex].Term = %d\n",
+			rf.me, rf.currentTerm, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
+
+		reply.Success = false
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		reply.XIndex = rf.lowerBound(reply.XTerm) + rf.snapshotIndex
+		reply.XLen = -1
 
 		if needPersist {
 			rf.persist()
@@ -628,20 +653,10 @@ func (rf *Raft) fastBackUp(reply *AppendEntriesReply) int {
 	if reply.XLen != -1 {
 		return reply.XLen // Case 3
 	} else {
-		lowerBound := func(a []LogEntry, x int) int {
-			return sort.Search(len(a), func(i int) bool {
-				return a[i].Term >= x
-			})
-		}
-
+		index := rf.lowerBound(reply.XTerm)
 		// leader contains XTerm
-		if rf.log[lowerBound(rf.log, reply.XTerm)].Term == reply.XTerm {
-			upperBound := func(a []LogEntry, x int) int {
-				return sort.Search(len(a), func(i int) bool {
-					return a[i].Term > x
-				})
-			}
-			return upperBound(rf.log, reply.XTerm) - 1 + rf.snapshotIndex // Case 2
+		if index < len(rf.log) && rf.log[index].Term == reply.XTerm {
+			return rf.upperBound(reply.XTerm) + rf.snapshotIndex // Case 2
 		} else {
 			return reply.XIndex // Case 1
 		}
@@ -649,8 +664,8 @@ func (rf *Raft) fastBackUp(reply *AppendEntriesReply) int {
 }
 
 func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
-	DPrintf("[%d]:[%d] lastMatchedIndex = %v, rf.matchIndex[server] = %v\n",
-		rf.me, rf.currentTerm, lastMatchedIndex, rf.matchIndex[server])
+	DPrintf("[%d]:[%d] lastMatchedIndex = %v, rf.matchIndex[%d] = %v\n",
+		rf.me, rf.currentTerm, lastMatchedIndex, server, rf.matchIndex[server])
 
 	if lastMatchedIndex > rf.matchIndex[server] {
 		rf.nextIndex[server] = lastMatchedIndex + 1
@@ -660,6 +675,7 @@ func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
 			rf.me, term, lastMatchedIndex, rf.commitIndex, rf.nextIndex, rf.matchIndex)
 		for n := lastMatchedIndex; n > rf.commitIndex; n-- {
 			if rf.log[n-rf.snapshotIndex].Term != term {
+				DPrintf("[%d]:[%d] rf.log[%d].Term = %v\n", rf.me, term, n, rf.log[n-rf.snapshotIndex].Term)
 				continue
 			}
 
@@ -711,6 +727,10 @@ func (rf *Raft) appendEntries(server int, term int) {
 
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term, true)
+	}
+
+	if rf.state != LEADER || rf.currentTerm != term {
+		DPrintf("[%d] not Leader any more, stop heartBeat\n", rf.me)
 		return
 	}
 
@@ -745,6 +765,7 @@ func (rf *Raft) heartBeat() {
 				rf.mu.Lock()
 
 				if rf.nextIndex[server] <= rf.snapshotIndex {
+					//DPrintf("[%d]:[%d] unexpected here, rf.nextIndex[%d] = %d, rf.snapshotIndex = %d\n", rf.me, term, server, rf.nextIndex[server], rf.snapshotIndex)
 					rf.installSnapshot(server, term)
 				} else {
 					rf.appendEntries(server, term)
