@@ -249,13 +249,13 @@ func (rf *Raft) installSnapshot(server int, term int) {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	DPrintf("[%d]:[%d] handle InstallSnapshot, args: %v\n", rf.me, rf.currentTerm, args)
 	rf.lastHeartBeat = time.Now()
 	reply.Term = rf.currentTerm
 
 	if rf.currentTerm > args.Term {
-		rf.mu.Unlock()
 		return
 	}
 
@@ -272,7 +272,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		if needPersist {
 			rf.persist()
 		}
-		rf.mu.Unlock()
 		return
 	}
 
@@ -291,7 +290,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshotTerm = args.LastIncludedTerm
 	rf.snapshotIndex = args.LastIncludedIndex
 	rf.persist()
-	rf.mu.Unlock()
 
 	go func(currentTerm int) {
 		msg := ApplyMsg{
@@ -515,43 +513,6 @@ func (reply *AppendEntriesReply) String() string {
 	return fmt.Sprintf("{Term = %d, Success = %v, XTerm = %d, XIndex = %d, XLen = %d}", reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
 }
 
-func (rf *Raft) applyCommand() {
-	DPrintf("[%d] commitIndex = %d, lastApplied = %d\n", rf.me, rf.commitIndex, rf.lastApplied)
-	if rf.commitIndex <= rf.lastApplied {
-		return
-	}
-
-	// send log[lastApplied + 1 : commit] to applyCh
-	startIndex := Max(0, rf.lastApplied-rf.snapshotIndex+1)
-	endIndex := rf.commitIndex - rf.snapshotIndex
-	DPrintf("[%d] startIndex = %d, endIndex = %d\n", rf.me, startIndex, endIndex)
-	log := append(make([]LogEntry, 0), rf.log[startIndex:endIndex+1]...)
-
-	go func() {
-		rf.lastAppliedCond.L.Lock()
-		for _, logEntry := range log {
-			for logEntry.Index > rf.lastApplied+1 {
-				rf.lastAppliedCond.Wait()
-			}
-			if logEntry.Index != rf.lastApplied+1 {
-				continue
-			}
-
-			msg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: logEntry.Index}
-			DPrintf("[%d] start push message to applyCh, msg = %s\n", rf.me, msg)
-			rf.applyCh <- msg
-			DPrintf("[%d] end push message to applyCh, msg = %s\n", rf.me, msg)
-
-			rf.mu.Lock()
-			rf.lastApplied = Max(rf.lastApplied, logEntry.Index)
-			rf.mu.Unlock()
-			rf.lastAppliedCond.Signal()
-		}
-		rf.lastAppliedCond.L.Unlock()
-		DPrintf("[%d] push message end\n", rf.me)
-	}()
-}
-
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -628,7 +589,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("[%d]:[%d] args.LeaderCommit = %d, rf.commitIndex = %v, rf.getLastLog().Index = %d\n", rf.me, rf.currentTerm, args.LeaderCommit, rf.commitIndex, rf.getLastLog().Index)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommit, rf.getLastLog().Index)
-		rf.applyCommand()
+		rf.lastAppliedCond.Signal()
 	}
 	reply.Success = true
 
@@ -690,7 +651,7 @@ func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
 		if count > len(rf.peers)/2 {
 			DPrintf("[%d]:[%d] find n = %d bigger than commitIndex(%d) with majority\n", rf.me, term, n, rf.commitIndex)
 			rf.commitIndex = n
-			rf.applyCommand()
+			rf.lastAppliedCond.Signal()
 			break
 		}
 	}
@@ -763,7 +724,6 @@ func (rf *Raft) heartBeat() {
 				rf.mu.Lock()
 
 				if rf.nextIndex[server] <= rf.snapshotIndex {
-					//DPrintf("[%d]:[%d] unexpected here, rf.nextIndex[%d] = %d, rf.snapshotIndex = %d\n", rf.me, term, server, rf.nextIndex[server], rf.snapshotIndex)
 					rf.installSnapshot(server, term)
 				} else {
 					rf.appendEntries(server, term)
@@ -845,6 +805,31 @@ func (rf *Raft) electionTicker() {
 	}
 }
 
+func (rf *Raft) applier() {
+	rf.lastAppliedCond.L.Lock()
+	for rf.killed() == false {
+		for rf.commitIndex <= rf.lastApplied {
+			rf.lastAppliedCond.Wait()
+		}
+
+		index := rf.lastApplied + 1 - rf.snapshotIndex
+		if index <= 0 {
+			continue
+		}
+		log := rf.log[index]
+		msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: log.Index}
+		rf.lastAppliedCond.L.Unlock()
+
+		DPrintf("[%d] start push message to applyCh, msg = %s\n", rf.me, msg)
+		rf.applyCh <- msg
+		DPrintf("[%d] end push message to applyCh, msg = %s\n", rf.me, msg)
+
+		rf.lastAppliedCond.L.Lock()
+		rf.lastApplied += 1
+	}
+	rf.lastAppliedCond.L.Unlock()
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -879,7 +864,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.commitIndex = rf.snapshotIndex
 	rf.lastApplied = rf.snapshotIndex
-	rf.lastAppliedCond = sync.NewCond(&sync.Mutex{})
+	rf.lastAppliedCond = sync.NewCond(&rf.mu)
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -889,6 +874,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	}
 
 	rf.applyCh = applyCh
+	go rf.applier()
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
