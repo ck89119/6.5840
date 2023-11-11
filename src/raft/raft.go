@@ -91,6 +91,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	state         State
 	lastHeartBeat time.Time
+	lastAppend    []time.Time
 
 	// Persistent state on all servers:
 	// (Updated on stable storage before responding to RPCs)
@@ -130,15 +131,22 @@ func (rf *Raft) upperBound(term int) int {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	var term int
-	var isleader bool
-	// Your code here (2A).
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term = rf.currentTerm
-	isleader = rf.state == LEADER
+
+	term := rf.currentTerm
+	isleader := rf.state == LEADER
 	return term, isleader
+}
+
+func (rf *Raft) GetStatePlus() (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	index := rf.getLastLog().Index
+	term := rf.currentTerm
+	isleader := rf.state == LEADER
+	return index, term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -149,7 +157,6 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// with rf.mu.Locked
 	writer := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(writer)
 	_ = encoder.Encode(rf.currentTerm)
@@ -159,11 +166,8 @@ func (rf *Raft) persist() {
 	_ = encoder.Encode(rf.snapshotIndex)
 	DPrintf("[%d] persist() currentTerm = %v, votedFor = %v, len(log) = %v, snapshotTerm = %d, snapshotIndex = %d\n",
 		rf.me, rf.currentTerm, rf.votedFor, len(rf.log), rf.snapshotTerm, rf.snapshotIndex)
-	// TODO unlock before write
-	//rf.mu.Unlock()
 	rf.persister.Save(writer.Bytes(), rf.snapshot)
 	DPrintf("[%d] persist() end\n", rf.me)
-	//rf.mu.Lock()
 }
 
 // restore previously persisted state.
@@ -212,7 +216,7 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) installSnapshot(server int, term int) {
-	// enter with locked
+	rf.mu.Lock()
 	args := InstallSnapshotArgs{
 		Term:              term,
 		LeaderId:          rf.me,
@@ -276,7 +280,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	index := Min(args.LastIncludedIndex-rf.snapshotIndex, len(rf.log)-1)
-	log := append(make([]LogEntry, 0), rf.log[index:]...)
+	log := append([]LogEntry{}, rf.log[index:]...)
 	// if LastIncludedIndex > lastLog.Index, reset first log entry manually
 	log[0].Term = args.LastIncludedTerm
 	log[0].Index = args.LastIncludedIndex
@@ -323,7 +327,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	index -= rf.snapshotIndex
 	snapshotTerm := rf.log[index].Term
 	snapshotIndex := rf.log[index].Index
-	log := append(make([]LogEntry, 0), rf.log[index:]...)
+	log := append([]LogEntry{}, rf.log[index:]...)
 
 	rf.log = log
 	rf.snapshot = snapshot
@@ -658,11 +662,17 @@ func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
 }
 
 func (rf *Raft) appendEntries(server int, term int) {
-	// enter with locked
+	rf.mu.Lock()
 	prevLog := rf.log[rf.nextIndex[server]-rf.snapshotIndex-1]
 	startIndex := rf.nextIndex[server] - rf.snapshotIndex
-	//endIndex := rf.getLastLog().Index - rf.snapshotIndex
-	entries := append(make([]LogEntry, 0), rf.log[startIndex:]...)
+	// empty entries heartbeat with 10 Hz max
+	if startIndex == len(rf.log) && time.Now().Sub(rf.lastAppend[server]) < 100*time.Millisecond {
+		rf.mu.Unlock()
+		return
+	}
+	rf.lastAppend[server] = time.Now()
+
+	entries := append([]LogEntry{}, rf.log[startIndex:]...)
 	args := AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     rf.me,
@@ -703,7 +713,9 @@ func (rf *Raft) appendEntries(server int, term int) {
 }
 
 func (rf *Raft) heartBeat() {
+	rf.mu.Lock()
 	term := rf.currentTerm
+	rf.mu.Unlock()
 
 	for rf.killed() == false {
 		rf.mu.Lock()
@@ -720,10 +732,12 @@ func (rf *Raft) heartBeat() {
 			}
 
 			go func(server int) {
-				// unlock in called function
 				rf.mu.Lock()
+				nextIndex := rf.nextIndex[server]
+				snapshotIndex := rf.snapshotIndex
+				rf.mu.Unlock()
 
-				if rf.nextIndex[server] <= rf.snapshotIndex {
+				if nextIndex <= snapshotIndex {
 					rf.installSnapshot(server, term)
 				} else {
 					rf.appendEntries(server, term)
@@ -732,8 +746,7 @@ func (rf *Raft) heartBeat() {
 		}
 
 		DPrintf("[%d]:[%d] heartBeat\n", rf.me, term)
-		// 10 times heart beat per second
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -796,7 +809,7 @@ func (rf *Raft) electionTicker() {
 		rf.mu.Lock()
 		// Check if a leader election should be started.
 		duration := time.Now().Sub(rf.lastHeartBeat)
-		DPrintf("[%d]:[%d] state: %v, duration from last heartBeaten: %v (ms)\n", rf.me, rf.currentTerm, rf.state, duration)
+		DPrintf("[%d]:[%d] state: %v, duration from last heartBeaten: %v\n", rf.me, rf.currentTerm, rf.state, duration)
 		if rf.state != LEADER && duration > time.Duration(ms)*time.Millisecond {
 			go rf.startElection()
 		}
@@ -849,6 +862,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = FOLLOWER
 	rf.lastHeartBeat = time.Now()
+	rf.lastAppend = make([]time.Time, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.lastAppend[i] = rf.lastHeartBeat
+	}
 
 	// non-volatile
 	rf.currentTerm = 0
@@ -868,7 +885,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	for i := 0; i < len(rf.peers); i++ {
+	for i := 0; i < len(peers); i++ {
 		rf.nextIndex[i] = rf.getLastLog().Index + 1
 		rf.matchIndex[i] = rf.snapshotIndex
 	}
