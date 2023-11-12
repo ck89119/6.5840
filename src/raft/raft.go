@@ -139,14 +139,15 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-func (rf *Raft) GetStatePlus() (int, int, bool) {
+func (rf *Raft) GetLogTerm(index int) int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	index := rf.getLastLog().Index
-	term := rf.currentTerm
-	isleader := rf.state == LEADER
-	return index, term, isleader
+	if index <= rf.snapshotIndex {
+		// TODO if log snapshoted
+		return -1
+	}
+	return rf.log[index-rf.snapshotIndex].Term
 }
 
 // save Raft's persistent state to stable storage,

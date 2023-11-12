@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -11,18 +12,19 @@ import (
 
 const Debug = false
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Type     string // Get, Put or Append
+	Key      string
+	Value    string
+	ClientId int64
+	Seq      int64
 }
 
 type KVServer struct {
@@ -32,18 +34,87 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate            int // snapshot if log grows this big
+	startIndex, lastApplied int
+	lastAppliedCond         *sync.Cond
 
-	// Your definitions here.
+	table          map[string]string
+	duplicateTable map[int64]int64
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	DPrintf("[%d] handle Get start, args = %s\n", kv.me, args)
+
+	lastLogIndex, term, isLeader := kv.rf.Start(Op{
+		Type: "Get",
+		Key:  args.Key,
+	})
+	DPrintf("[%d] lastLogIndex = %v, term = %v, isLeader = %v\n", kv.me, lastLogIndex, term, isLeader)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.lastAppliedCond.L.Lock()
+	defer kv.lastAppliedCond.L.Unlock()
+	for kv.lastApplied < lastLogIndex {
+		kv.lastAppliedCond.Wait()
+	}
+
+	appliedLogTerm := kv.rf.GetLogTerm(lastLogIndex)
+	if appliedLogTerm != term {
+		DPrintf("[%d] appliedLogTerm = %v, term = %v\n", kv.me, appliedLogTerm, term)
+		reply.Err = ErrWrongTerm
+		return
+	}
+
+	if value, ok := kv.table[args.Key]; ok {
+		reply.Err = OK
+		reply.Value = value
+	} else {
+		reply.Err = ErrNoKey
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	DPrintf("[%d] handle PutAppend start, args = %s\n", kv.me, args)
+
+	kv.mu.Lock()
+	if args.Seq == kv.duplicateTable[args.ClientId] {
+		DPrintf("[%d] duplicate PutAppend, args = %s\n", kv.me, args)
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	lastLogIndex, term, isLeader := kv.rf.Start(Op{
+		Type:     args.Op,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		Seq:      args.Seq,
+	})
+	DPrintf("[%d] lastLogIndex = %v, term = %v, isLeader = %v\n", kv.me, lastLogIndex, term, isLeader)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.lastAppliedCond.L.Lock()
+	defer kv.lastAppliedCond.L.Unlock()
+	for kv.lastApplied < lastLogIndex {
+		kv.lastAppliedCond.Wait()
+	}
+
+	appliedLogTerm := kv.rf.GetLogTerm(lastLogIndex)
+	if appliedLogTerm != term {
+		DPrintf("[%d] appliedLogTerm = %v, term = %v\n", kv.me, appliedLogTerm, term)
+		reply.Err = ErrWrongTerm
+		return
+	}
+
+	reply.Err = OK
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -63,6 +134,47 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) apply() {
+	for msg := range kv.applyCh {
+		if kv.killed() == true {
+			return
+		}
+
+		DPrintf("[%d] receive apply msg: %v\n", kv.me, msg)
+		if msg.SnapshotValid {
+			kv.startIndex = msg.SnapshotIndex
+			continue
+		}
+
+		kv.mu.Lock()
+		// if need make snapshot
+		if kv.maxraftstate != -1 && kv.lastApplied-kv.startIndex >= kv.maxraftstate {
+			writer := new(bytes.Buffer)
+			_ = labgob.NewEncoder(writer).Encode(kv.table)
+			kv.rf.Snapshot(kv.lastApplied, writer.Bytes())
+		}
+
+		op := msg.Command.(Op)
+		// only update when seq != current seq
+		if op.Type != "Get" && kv.duplicateTable[op.ClientId] != op.Seq {
+			kv.updateTable(op)
+			kv.duplicateTable[op.ClientId] = op.Seq
+		}
+
+		kv.lastApplied += 1
+		kv.lastAppliedCond.Broadcast()
+		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) updateTable(op Op) {
+	if op.Type == "Put" {
+		kv.table[op.Key] = op.Value
+	} else {
+		kv.table[op.Key] += op.Value
+	}
 }
 
 // servers[] contains the ports of the set of
@@ -85,13 +197,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
+	kv.startIndex = 0
+	kv.lastApplied = 0
+	kv.lastAppliedCond = sync.NewCond(&kv.mu)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.table = map[string]string{}
+	kv.duplicateTable = map[int64]int64{}
+
+	go kv.apply()
 
 	return kv
 }
