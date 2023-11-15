@@ -217,7 +217,7 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) installSnapshot(server int, term int) {
-	rf.mu.Lock()
+	// call with mu.locked
 	args := InstallSnapshotArgs{
 		Term:              term,
 		LeaderId:          rf.me,
@@ -663,7 +663,7 @@ func (rf *Raft) updateIndexes(server int, term int, lastMatchedIndex int) {
 }
 
 func (rf *Raft) appendEntries(server int, term int) {
-	rf.mu.Lock()
+	// call with mu.locked
 	prevLog := rf.log[rf.nextIndex[server]-rf.snapshotIndex-1]
 	startIndex := rf.nextIndex[server] - rf.snapshotIndex
 	// empty entries heartbeat with 10 Hz max
@@ -734,13 +734,11 @@ func (rf *Raft) heartBeat() {
 
 			go func(server int) {
 				rf.mu.Lock()
-				nextIndex := rf.nextIndex[server]
-				snapshotIndex := rf.snapshotIndex
-				rf.mu.Unlock()
-
-				if nextIndex <= snapshotIndex {
+				if rf.nextIndex[server] <= rf.snapshotIndex {
+					// can't unlock here, maybe snapshoted before re-lock
 					rf.installSnapshot(server, term)
 				} else {
+					// can't unlock here, maybe snapshoted before re-lock
 					rf.appendEntries(server, term)
 				}
 			}(i)

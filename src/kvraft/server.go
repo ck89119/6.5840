@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -34,9 +35,11 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate            int // snapshot if log grows this big
-	startIndex, lastApplied int
-	lastAppliedCond         *sync.Cond
+	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
+
+	lastApplied     int
+	lastAppliedCond *sync.Cond
 
 	table          map[string]string
 	duplicateTable map[int64]int64
@@ -144,18 +147,11 @@ func (kv *KVServer) apply() {
 
 		DPrintf("[%d] receive apply msg: %v\n", kv.me, msg)
 		if msg.SnapshotValid {
-			kv.startIndex = msg.SnapshotIndex
+			kv.installSnapshot(msg.Snapshot)
 			continue
 		}
 
 		kv.mu.Lock()
-		// if need make snapshot
-		if kv.maxraftstate != -1 && kv.lastApplied-kv.startIndex >= kv.maxraftstate {
-			writer := new(bytes.Buffer)
-			_ = labgob.NewEncoder(writer).Encode(kv.table)
-			kv.rf.Snapshot(kv.lastApplied, writer.Bytes())
-		}
-
 		op := msg.Command.(Op)
 		// only update when seq != current seq
 		if op.Type != "Get" && kv.duplicateTable[op.ClientId] != op.Seq {
@@ -164,8 +160,9 @@ func (kv *KVServer) apply() {
 		}
 
 		kv.lastApplied += 1
-		kv.lastAppliedCond.Broadcast()
 		kv.mu.Unlock()
+
+		kv.lastAppliedCond.Broadcast()
 	}
 }
 
@@ -175,6 +172,55 @@ func (kv *KVServer) updateTable(op Op) {
 	} else {
 		kv.table[op.Key] += op.Value
 	}
+}
+
+func (kv *KVServer) snapshot() {
+	for kv.killed() == false && kv.maxraftstate != -1 {
+		if len(kv.persister.ReadRaftState()) >= kv.maxraftstate {
+			kv.mu.Lock()
+			lastApplied := kv.lastApplied
+			writer := new(bytes.Buffer)
+			encoder := labgob.NewEncoder(writer)
+			_ = encoder.Encode(lastApplied)
+			_ = encoder.Encode(kv.table)
+			_ = encoder.Encode(kv.duplicateTable)
+			DPrintf("[%d] snapshot() lastApplied = %v, len(table) = %v, len(duplicateTable) = %v\n", kv.me,
+				kv.lastApplied, len(kv.table), len(kv.duplicateTable))
+			kv.mu.Unlock()
+
+			kv.rf.Snapshot(lastApplied, writer.Bytes())
+			DPrintf("[%d] snapshot() complete", kv.me)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		DPrintf("[%d] empty snapshot", kv.me)
+		return
+	}
+	DPrintf("[%d] len(snapshot) = %d", kv.me, len(snapshot))
+
+	reader := bytes.NewBuffer(snapshot)
+	decoder := labgob.NewDecoder(reader)
+	var lastApplied int
+	var table map[string]string
+	var duplicateTable map[int64]int64
+	_ = decoder.Decode(&lastApplied)
+	_ = decoder.Decode(&table)
+	_ = decoder.Decode(&duplicateTable)
+	DPrintf("[%d] installSnapshot() lastApplied = %v, len(table) = %v, len(duplicateTable) = %v\n", kv.me,
+		lastApplied, len(table), len(duplicateTable))
+
+	kv.mu.Lock()
+	kv.lastApplied = lastApplied
+	kv.table = table
+	kv.duplicateTable = duplicateTable
+	kv.mu.Unlock()
+
+	kv.lastAppliedCond.Broadcast()
 }
 
 // servers[] contains the ports of the set of
@@ -197,7 +243,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-	kv.startIndex = 0
+	kv.persister = persister
 	kv.lastApplied = 0
 	kv.lastAppliedCond = sync.NewCond(&kv.mu)
 
@@ -207,7 +253,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.table = map[string]string{}
 	kv.duplicateTable = map[int64]int64{}
 
+	kv.installSnapshot(persister.ReadSnapshot())
+
 	go kv.apply()
+	go kv.snapshot()
 
 	return kv
 }
