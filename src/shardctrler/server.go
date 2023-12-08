@@ -76,15 +76,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		Data: *args,
 	})
 
-	if err == ErrWrongLeader {
-		reply.WrongLeader = true
-	} else if err == ErrWrongTerm {
-		reply.WrongLeader = false
-		reply.Err = err
-	} else {
-		reply.WrongLeader = false
-		reply.Err = OK
-	}
+	reply.Err = err
 }
 
 func (sc *ShardCtrler) applyJoin(args JoinArgs) {
@@ -126,15 +118,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		Data: *args,
 	})
 
-	if err == ErrWrongLeader {
-		reply.WrongLeader = true
-	} else if err == ErrWrongTerm {
-		reply.WrongLeader = false
-		reply.Err = err
-	} else {
-		reply.WrongLeader = false
-		reply.Err = OK
-	}
+	reply.Err = err
 }
 
 func (sc *ShardCtrler) applyLeave(args LeaveArgs) {
@@ -167,15 +151,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		Data: *args,
 	})
 
-	if err == ErrWrongLeader {
-		reply.WrongLeader = true
-	} else if err == ErrWrongTerm {
-		reply.WrongLeader = false
-		reply.Err = err
-	} else {
-		reply.WrongLeader = false
-		reply.Err = OK
-	}
+	reply.Err = err
 }
 
 func (sc *ShardCtrler) applyMove(args MoveArgs) {
@@ -201,14 +177,8 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	})
 	DPrintf("[%d] err = %v\n", sc.me, err)
 
-	if err == ErrWrongLeader {
-		reply.WrongLeader = true
-	} else if err == ErrWrongTerm {
-		reply.WrongLeader = false
-		reply.Err = err
-	} else {
-		reply.WrongLeader = false
-		reply.Err = OK
+	reply.Err = err
+	if err == OK {
 		sc.mu.Lock()
 		if args.Num == -1 {
 			args.Num = len(sc.configs) - 1

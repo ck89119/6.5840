@@ -127,10 +127,39 @@ const (
 
 type Err string
 
-type JoinArgs struct {
-	Servers  map[int][]string // new GID -> servers mappings
+type Args interface {
+	getClientId() int64
+	getSeq() int64
+}
+
+type BaseArgs struct {
 	ClientId int64
 	Seq      int64
+}
+
+func (b *BaseArgs) getClientId() int64 {
+	return b.ClientId
+}
+
+func (b *BaseArgs) getSeq() int64 {
+	return b.Seq
+}
+
+type Reply interface {
+	getErr() Err
+}
+
+type BaseReply struct {
+	Err Err
+}
+
+func (b *BaseReply) getErr() Err {
+	return b.Err
+}
+
+type JoinArgs struct {
+	BaseArgs
+	Servers map[int][]string // new GID -> servers mappings
 }
 
 func (args *JoinArgs) String() string {
@@ -138,18 +167,16 @@ func (args *JoinArgs) String() string {
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 func (reply *JoinReply) String() string {
-	return fmt.Sprintf("{WrongLeader = %v, Err = %v}", reply.WrongLeader, reply.Err)
+	return fmt.Sprintf("{Err = %v}", reply.Err)
 }
 
 type LeaveArgs struct {
-	GIDs     []int
-	ClientId int64
-	Seq      int64
+	BaseArgs
+	GIDs []int
 }
 
 func (args *LeaveArgs) String() string {
@@ -157,19 +184,17 @@ func (args *LeaveArgs) String() string {
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 func (reply *LeaveReply) String() string {
-	return fmt.Sprintf("{WrongLeader = %v, Err = %v}", reply.WrongLeader, reply.Err)
+	return fmt.Sprintf("{Err = %v}", reply.Err)
 }
 
 type MoveArgs struct {
-	Shard    int
-	GID      int
-	ClientId int64
-	Seq      int64
+	BaseArgs
+	Shard int
+	GID   int
 }
 
 func (args *MoveArgs) String() string {
@@ -177,30 +202,29 @@ func (args *MoveArgs) String() string {
 }
 
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
 }
 
 func (reply *MoveReply) String() string {
-	return fmt.Sprintf("{WrongLeader = %v, Err = %v}", reply.WrongLeader, reply.Err)
+	return fmt.Sprintf("{Err = %v}", reply.Err)
 }
 
 type QueryArgs struct {
+	BaseArgs
 	Num int // desired config number
 }
 
 func (args *QueryArgs) String() string {
-	return fmt.Sprintf("{Num = %v}", args.Num)
+	return fmt.Sprintf("{Num = %v, ClientId = %d, Seq = %d}", args.Num, args.ClientId, args.Seq)
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	BaseReply
+	Config Config
 }
 
 func (reply *QueryReply) String() string {
-	return fmt.Sprintf("{WrongLeader = %v, Err = %v, Config.Num = %v}", reply.WrongLeader, reply.Err, reply.Config.Num)
+	return fmt.Sprintf("{Err = %v, Config = %v}", reply.Err, reply.Config)
 }
 
 func Max(a, b int) int {
