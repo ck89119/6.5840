@@ -5,6 +5,7 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raft"
 	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,8 @@ const (
 
 type OpType string
 
-type ApplyResult struct {
+type Result struct {
+	Seq   int64
 	Err   Err
 	Value string
 }
@@ -39,7 +41,10 @@ type Op struct {
 	Value    string
 	ClientId int64
 	Seq      int64
-	Result   *ApplyResult
+}
+
+func (o Op) String() string {
+	return fmt.Sprintf("{Type = %v, Key = %v, Value = %v, ClientId = %v, Seq = %v}", o.Type, o.Key, o.Value, o.ClientId, o.Seq)
 }
 
 type KVServer struct {
@@ -55,83 +60,59 @@ type KVServer struct {
 	lastApplied     int
 	lastAppliedCond *sync.Cond
 
-	table          map[string]string
-	duplicateTable map[int64]int64
+	table      map[string]string
+	lastResult map[int64]Result
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	DPrintf("[%d] handle Get start, args = %s\n", kv.me, args)
 
-	result := &ApplyResult{}
-	lastLogIndex, term, isLeader := kv.rf.Start(Op{
-		Type:   OpTypeGet,
-		Key:    args.Key,
-		Result: result,
+	kv.mu.Lock()
+	lastResult := kv.lastResult[args.ClientId]
+	kv.mu.Unlock()
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Get, args = %s\n", kv.me, args)
+		reply.Err = lastResult.Err
+		reply.Value = lastResult.Value
+		return
+	}
+
+	err := kv.waitForApplied(&Op{
+		Type:     OpTypeGet,
+		Key:      args.Key,
+		ClientId: args.ClientId,
+		Seq:      args.Seq,
 	})
-	DPrintf("[%d] lastLogIndex = %v, term = %v, isLeader = %v\n", kv.me, lastLogIndex, term, isLeader)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 
-	kv.lastAppliedCond.L.Lock()
-	defer kv.lastAppliedCond.L.Unlock()
-	for kv.lastApplied < lastLogIndex {
-		kv.lastAppliedCond.Wait()
+	reply.Err = err
+	if err == OK {
+		kv.mu.Lock()
+		reply.Value = kv.lastResult[args.ClientId].Value
+		kv.mu.Unlock()
 	}
-
-	appliedLogTerm := kv.rf.GetLogTerm(lastLogIndex)
-	if appliedLogTerm != term {
-		DPrintf("[%d] appliedLogTerm = %v, term = %v\n", kv.me, appliedLogTerm, term)
-		reply.Err = ErrWrongTerm
-		return
-	}
-
-	reply.Err = result.Err
-	reply.Value = result.Value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("[%d] handle PutAppend start, args = %s\n", kv.me, args)
 
 	kv.mu.Lock()
-	if args.Seq == kv.duplicateTable[args.ClientId] {
+	lastResult := kv.lastResult[args.ClientId]
+	kv.mu.Unlock()
+	if lastResult.Seq == args.Seq {
 		DPrintf("[%d] duplicate PutAppend, args = %s\n", kv.me, args)
 		reply.Err = OK
-		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Unlock()
 
-	result := &ApplyResult{}
-	lastLogIndex, term, isLeader := kv.rf.Start(Op{
+	err := kv.waitForApplied(&Op{
 		Type:     OpType(args.Op),
 		Key:      args.Key,
 		Value:    args.Value,
 		ClientId: args.ClientId,
 		Seq:      args.Seq,
-		Result:   result,
 	})
-	DPrintf("[%d] lastLogIndex = %v, term = %v, isLeader = %v\n", kv.me, lastLogIndex, term, isLeader)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 
-	kv.lastAppliedCond.L.Lock()
-	defer kv.lastAppliedCond.L.Unlock()
-	for kv.lastApplied < lastLogIndex {
-		kv.lastAppliedCond.Wait()
-	}
-
-	appliedLogTerm := kv.rf.GetLogTerm(lastLogIndex)
-	if appliedLogTerm != term {
-		DPrintf("[%d] appliedLogTerm = %v, term = %v\n", kv.me, appliedLogTerm, term)
-		reply.Err = ErrWrongTerm
-		return
-	}
-
-	reply.Err = result.Err
+	reply.Err = err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -167,23 +148,32 @@ func (kv *KVServer) apply() {
 
 		kv.mu.Lock()
 		op := msg.Command.(Op)
-		if op.Type == OpTypeGet {
-			// must get result here
+		// only update when last seq != current seq
+		if kv.lastResult[op.ClientId].Seq != op.Seq {
 			// if get value in Get(), get mutex failed, and mutex gained by above Lock(line 168), table will be updated by next msg
-			if value, ok := kv.table[op.Key]; ok {
-				op.Result.Err = OK
-				op.Result.Value = value
+			if op.Type == OpTypeGet {
+				// must get result here
+				if value, ok := kv.table[op.Key]; ok {
+					kv.lastResult[op.ClientId] = Result{
+						Seq:   op.Seq,
+						Err:   OK,
+						Value: value,
+					}
+				} else {
+					kv.lastResult[op.ClientId] = Result{
+						Seq:   op.Seq,
+						Err:   ErrNoKey,
+						Value: "",
+					}
+				}
 			} else {
-				op.Result.Err = ErrNoKey
-				op.Result.Value = ""
+				kv.updateTable(&op)
+				kv.lastResult[op.ClientId] = Result{
+					Seq:   op.Seq,
+					Err:   OK,
+					Value: "",
+				}
 			}
-		} else {
-			// only update when seq != current seq
-			if kv.duplicateTable[op.ClientId] != op.Seq {
-				kv.updateTable(op)
-				kv.duplicateTable[op.ClientId] = op.Seq
-			}
-			op.Result.Err = OK
 		}
 
 		kv.lastApplied = msg.CommandIndex
@@ -192,7 +182,7 @@ func (kv *KVServer) apply() {
 	}
 }
 
-func (kv *KVServer) updateTable(op Op) {
+func (kv *KVServer) updateTable(op *Op) {
 	if op.Type == OpTypePut {
 		kv.table[op.Key] = op.Value
 	} else {
@@ -213,9 +203,9 @@ func (kv *KVServer) snapshot() {
 			encoder := labgob.NewEncoder(writer)
 			_ = encoder.Encode(lastApplied)
 			_ = encoder.Encode(kv.table)
-			_ = encoder.Encode(kv.duplicateTable)
-			DPrintf("[%d] snapshot() lastApplied = %v, len(table) = %v, len(duplicateTable) = %v\n", kv.me,
-				kv.lastApplied, len(kv.table), len(kv.duplicateTable))
+			_ = encoder.Encode(kv.lastResult)
+			DPrintf("[%d] snapshot() lastApplied = %v, len(table) = %v, len(lastResult) = %v\n", kv.me,
+				kv.lastApplied, len(kv.table), len(kv.lastResult))
 			kv.mu.Unlock()
 
 			kv.rf.Snapshot(lastApplied, writer.Bytes())
@@ -237,18 +227,40 @@ func (kv *KVServer) installSnapshot(snapshot []byte) {
 	decoder := labgob.NewDecoder(reader)
 	var lastApplied int
 	var table map[string]string
-	var duplicateTable map[int64]int64
+	var lastResult map[int64]Result
 	_ = decoder.Decode(&lastApplied)
 	_ = decoder.Decode(&table)
-	_ = decoder.Decode(&duplicateTable)
-	DPrintf("[%d] installSnapshot() lastApplied = %v, len(table) = %v, len(duplicateTable) = %v\n", kv.me,
-		lastApplied, len(table), len(duplicateTable))
+	_ = decoder.Decode(&lastResult)
+	DPrintf("[%d] installSnapshot() lastApplied = %v, len(table) = %v, len(lastResult) = %v\n", kv.me,
+		lastApplied, len(table), len(lastResult))
 
 	kv.mu.Lock()
 	kv.lastApplied = lastApplied
 	kv.table = table
-	kv.duplicateTable = duplicateTable
+	kv.lastResult = lastResult
 	kv.mu.Unlock()
+}
+
+func (kv *KVServer) waitForApplied(op *Op) Err {
+	lastLogIndex, term, isLeader := kv.rf.Start(*op)
+	DPrintf("[%d] lastLogIndex = %v, term = %v, isLeader = %v\n", kv.me, lastLogIndex, term, isLeader)
+	if !isLeader {
+		return ErrWrongLeader
+	}
+
+	kv.lastAppliedCond.L.Lock()
+	defer kv.lastAppliedCond.L.Unlock()
+	for kv.lastApplied < lastLogIndex {
+		kv.lastAppliedCond.Wait()
+	}
+
+	appliedLogTerm := kv.rf.GetLogTerm(lastLogIndex)
+	if appliedLogTerm != term {
+		DPrintf("[%d] appliedLogTerm = %v, term = %v\n", kv.me, appliedLogTerm, term)
+		return ErrWrongTerm
+	}
+
+	return OK
 }
 
 // servers[] contains the ports of the set of
@@ -279,7 +291,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.table = map[string]string{}
-	kv.duplicateTable = map[int64]int64{}
+	kv.lastResult = map[int64]Result{}
 
 	kv.installSnapshot(persister.ReadSnapshot())
 

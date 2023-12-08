@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"6.5840/labrpc"
-	"sync"
 	"time"
 )
 import "crypto/rand"
@@ -10,7 +9,6 @@ import "math/big"
 
 type Clerk struct {
 	servers  []*labrpc.ClientEnd
-	mu       sync.Mutex
 	clientId int64
 	seq      int64
 	leaderId int
@@ -43,20 +41,20 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	ck.mu.Lock()
-	leaderId := ck.leaderId
-	ck.mu.Unlock()
+	ck.seq += 1
 
 	for {
 		args := GetArgs{
-			Key: key,
+			Key:      key,
+			ClientId: ck.clientId,
+			Seq:      ck.seq,
 		}
 		reply := GetReply{}
 		done := make(chan bool)
 
-		DPrintf("call KVServer[%d].Get start, args = %s\n", leaderId, &args)
+		DPrintf("call KVServer[%d].Get start, args = %s\n", ck.leaderId, &args)
 		go func() {
-			done <- ck.servers[leaderId].Call("KVServer.Get", &args, &reply)
+			done <- ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
 		}()
 
 		var ok bool
@@ -64,30 +62,21 @@ func (ck *Clerk) Get(key string) string {
 		case ok = <-done:
 		case <-time.After(time.Second):
 			// timeout, retry
-			DPrintf("call KVServer[%d].Get timeout, retry, args = %s\n", leaderId, &args)
+			DPrintf("call KVServer[%d].Get timeout, retry, args = %s\n", ck.leaderId, &args)
 			continue
 		}
 
-		if !ok {
-			leaderId = (leaderId + 1) % len(ck.servers)
-			DPrintf("call KVServer[%d].Get failed, retry, args = %s\n", leaderId, &args)
-			continue
-		}
-
-		if reply.Err == ErrWrongLeader {
-			leaderId = (leaderId + 1) % len(ck.servers)
-			DPrintf("call KVServer[%d].Get finished, ErrWrongLeader, retry\n", leaderId)
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			DPrintf("call KVServer[%d].Get failed, retry, reply = %s\n", ck.leaderId, &reply)
 			continue
 		}
 
 		if reply.Err == ErrWrongTerm {
-			DPrintf("call KVServer[%d].Get finished, ErrWrongTerm, retry\n", leaderId)
+			DPrintf("call KVServer[%d].Get finished, ErrWrongTerm, retry\n", ck.leaderId)
 			continue
 		}
 
-		ck.mu.Lock()
-		ck.leaderId = leaderId
-		ck.mu.Unlock()
 		return reply.Value
 	}
 }
@@ -101,12 +90,7 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	ck.mu.Lock()
 	ck.seq += 1
-
-	seq := ck.seq
-	leaderId := ck.leaderId
-	ck.mu.Unlock()
 
 	for {
 		args := PutAppendArgs{
@@ -114,14 +98,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			Value:    value,
 			Op:       op,
 			ClientId: ck.clientId,
-			Seq:      seq,
+			Seq:      ck.seq,
 		}
 		reply := PutAppendReply{}
 		done := make(chan bool)
 
-		DPrintf("call KVServer[%d].PutAppend start, args = %s\n", leaderId, &args)
+		DPrintf("call KVServer[%d].PutAppend start, args = %s\n", ck.leaderId, &args)
 		go func() {
-			done <- ck.servers[leaderId].Call("KVServer.PutAppend", &args, &reply)
+			done <- ck.servers[ck.leaderId].Call("KVServer.PutAppend", &args, &reply)
 		}()
 
 		var ok bool
@@ -129,30 +113,21 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		case ok = <-done:
 		case <-time.After(time.Second):
 			// timeout, retry
-			DPrintf("call KVServer[%d].PutAppend timeout, retry, args = %s\n", leaderId, &args)
+			DPrintf("call KVServer[%d].PutAppend timeout, retry, args = %s\n", ck.leaderId, &args)
 			continue
 		}
 
-		if !ok {
-			leaderId = (leaderId + 1) % len(ck.servers)
-			DPrintf("call KVServer[%d].PutAppend failed, retry, args = %s\n", leaderId, &args)
-			continue
-		}
-
-		if reply.Err == ErrWrongLeader {
-			leaderId = (leaderId + 1) % len(ck.servers)
-			DPrintf("call KVServer[%d].PutAppend finished, ErrWrongLeader, retry\n", leaderId)
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			DPrintf("call KVServer[%d].PutAppend failed, retry, reply = %s\n", ck.leaderId, &reply)
 			continue
 		}
 
 		if reply.Err == ErrWrongTerm {
-			DPrintf("call KVServer[%d].PutAppend finished, ErrWrongTerm, retry\n", leaderId)
+			DPrintf("call KVServer[%d].PutAppend finished, ErrWrongTerm, retry\n", ck.leaderId)
 			continue
 		}
 
-		ck.mu.Lock()
-		ck.leaderId = leaderId
-		ck.mu.Unlock()
 		return
 	}
 }

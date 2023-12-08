@@ -34,7 +34,9 @@ func (reply *PutAppendReply) String() string {
 }
 
 type GetArgs struct {
-	Key string
+	Key      string
+	ClientId int64
+	Seq      int64
 }
 
 func (args *GetArgs) String() string {
