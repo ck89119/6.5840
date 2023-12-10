@@ -4,9 +4,7 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import (
-	"6.5840/labrpc"
-)
+import "6.5840/labrpc"
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -32,40 +30,6 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.seq = 0
 	ck.leaderId = 0
 	return ck
-}
-
-func (ck *Clerk) call(method string, args Args, reply Reply) {
-	for {
-		done := make(chan bool)
-
-		DPrintf("call %s[%d] start, args = %s\n", method, ck.leaderId, args)
-		go func() {
-			done <- ck.servers[ck.leaderId].Call(method, args, reply)
-		}()
-
-		var ok bool
-		select {
-		case ok = <-done:
-		case <-time.After(time.Second):
-			// timeout, retry
-			DPrintf("call %s[%d] timeout, retry, args = %s\n", method, ck.leaderId, args)
-			continue
-		}
-
-		if !ok || reply.getErr() == ErrWrongLeader {
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-			DPrintf("call %s[%d] !ok || ErrWrongLeader, retry\n", method, ck.leaderId)
-			continue
-		}
-
-		if reply.getErr() == ErrWrongTerm {
-			DPrintf("call %s[%d] ErrWrongTerm, retry\n", method, ck.leaderId)
-			continue
-		}
-
-		DPrintf("call %s[%d] success, reply = %s\n", method, ck.leaderId, reply)
-		return
-	}
 }
 
 func (ck *Clerk) Query(num int) Config {
@@ -120,4 +84,38 @@ func (ck *Clerk) Move(shard int, gid int) {
 	}
 	reply := MoveReply{}
 	ck.call("ShardCtrler.Move", &args, &reply)
+}
+
+func (ck *Clerk) call(method string, args Args, reply Reply) {
+	for {
+		done := make(chan bool)
+
+		DPrintf("call %s[%d] start, args = %s\n", method, ck.leaderId, args)
+		go func() {
+			done <- ck.servers[ck.leaderId].Call(method, args, reply)
+		}()
+
+		var ok bool
+		select {
+		case ok = <-done:
+		case <-time.After(time.Second):
+			// timeout, retry
+			DPrintf("call %s[%d] timeout, retry, args = %s\n", method, ck.leaderId, args)
+			continue
+		}
+
+		if !ok || reply.getErr() == ErrWrongLeader {
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			DPrintf("call %s[%d] !ok || ErrWrongLeader, retry\n", method, ck.leaderId)
+			continue
+		}
+
+		if reply.getErr() == ErrWrongTerm {
+			DPrintf("call %s[%d] ErrWrongTerm, retry\n", method, ck.leaderId)
+			continue
+		}
+
+		DPrintf("call %s[%d] success, reply = %s\n", method, ck.leaderId, reply)
+		return
+	}
 }

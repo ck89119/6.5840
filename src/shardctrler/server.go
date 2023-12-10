@@ -17,6 +17,12 @@ func DPrintf(format string, a ...interface{}) {
 	return
 }
 
+type Result struct {
+	Seq    int64
+	Err    Err
+	Config Config
+}
+
 type ShardCtrler struct {
 	mu      sync.Mutex
 	me      int
@@ -29,7 +35,7 @@ type ShardCtrler struct {
 	lastApplied     int
 	lastAppliedCond *sync.Cond
 
-	duplicateTable map[int64]int64
+	lastResult map[int64]Result
 }
 
 type Op struct {
@@ -59,15 +65,11 @@ func (sc *ShardCtrler) waitForApplied(op Op) Err {
 	return OK
 }
 
-func (sc *ShardCtrler) isDuplicatedRequest(clientId, seq int64) bool {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	return seq == sc.duplicateTable[clientId]
-}
-
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
-		reply.Err = OK
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Join, args = %s\n", sc.me, args)
+		reply.Err = lastResult.Err
 		return
 	}
 
@@ -79,20 +81,18 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	reply.Err = err
 }
 
-func (sc *ShardCtrler) applyJoin(args JoinArgs) {
-	DPrintf("[%d] start applyJoin, args = %s\n", sc.me, &args)
+func (sc *ShardCtrler) applyJoin(args *JoinArgs) {
+	DPrintf("[%d] start applyJoin, args = %s\n", sc.me, args)
 
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Join, args = %s\n", sc.me, args)
 		return
 	}
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	defer func() {
-		sc.duplicateTable[args.ClientId] = args.Seq
-	}()
-
-	clone := sc.configs[len(sc.configs)-1].clone()
+	clone := sc.configs[len(sc.configs)-1].Clone()
 	DPrintf("[%d] start applyJoin, clone finished\n", sc.me)
 	for gid, serverNames := range args.Servers {
 		DPrintf("[%d] start applyJoin, gid = %v, serverNames = %v\n", sc.me, gid, serverNames)
@@ -105,11 +105,18 @@ func (sc *ShardCtrler) applyJoin(args JoinArgs) {
 	(&clone).balance()
 	DPrintf("[%d] start applyJoin, balance finished\n", sc.me)
 	sc.configs = append(sc.configs, clone)
+
+	sc.lastResult[args.ClientId] = Result{
+		Seq: args.Seq,
+		Err: OK,
+	}
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
-		reply.Err = OK
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Leave, args = %s\n", sc.me, args)
+		reply.Err = lastResult.Err
 		return
 	}
 
@@ -121,28 +128,34 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	reply.Err = err
 }
 
-func (sc *ShardCtrler) applyLeave(args LeaveArgs) {
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
+func (sc *ShardCtrler) applyLeave(args *LeaveArgs) {
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Leave, args = %s\n", sc.me, args)
 		return
 	}
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	defer func() {
-		sc.duplicateTable[args.ClientId] = args.Seq
-	}()
 
-	clone := sc.configs[len(sc.configs)-1].clone()
+	clone := sc.configs[len(sc.configs)-1].Clone()
 	for _, gid := range args.GIDs {
 		delete(clone.Groups, gid)
 	}
 	(&clone).balance()
 	sc.configs = append(sc.configs, clone)
+
+	sc.lastResult[args.ClientId] = Result{
+		Seq: args.Seq,
+		Err: OK,
+	}
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
-		reply.Err = OK
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Move, args = %s\n", sc.me, args)
+		reply.Err = lastResult.Err
 		return
 	}
 
@@ -154,23 +167,34 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	reply.Err = err
 }
 
-func (sc *ShardCtrler) applyMove(args MoveArgs) {
-	if sc.isDuplicatedRequest(args.ClientId, args.Seq) {
+func (sc *ShardCtrler) applyMove(args *MoveArgs) {
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Move, args = %s\n", sc.me, args)
 		return
 	}
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	defer func() {
-		sc.duplicateTable[args.ClientId] = args.Seq
-	}()
 
-	clone := sc.configs[len(sc.configs)-1].clone()
+	clone := sc.configs[len(sc.configs)-1].Clone()
 	clone.Shards[args.Shard] = args.GID
 	sc.configs = append(sc.configs, clone)
+
+	sc.lastResult[args.ClientId] = Result{
+		Seq: args.Seq,
+		Err: OK,
+	}
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Query, args = %s\n", sc.me, args)
+		reply.Err = lastResult.Err
+		return
+	}
+
 	err := sc.waitForApplied(Op{
 		Type: "Query",
 		Data: *args,
@@ -179,12 +203,27 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 
 	reply.Err = err
 	if err == OK {
-		sc.mu.Lock()
-		if args.Num == -1 {
-			args.Num = len(sc.configs) - 1
-		}
-		reply.Config = sc.configs[args.Num]
-		sc.mu.Unlock()
+		reply.Config = sc.getLastResult(args.ClientId).Config
+	}
+}
+
+func (sc *ShardCtrler) applyQuery(args *QueryArgs) {
+	lastResult := sc.getLastResult(args.ClientId)
+	if lastResult.Seq == args.Seq {
+		DPrintf("[%d] duplicate Query, args = %s\n", sc.me, args)
+		return
+	}
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if args.Num == -1 {
+		args.Num = len(sc.configs) - 1
+	}
+	sc.lastResult[args.ClientId] = Result{
+		Seq:    args.Seq,
+		Err:    OK,
+		Config: sc.configs[args.Num],
 	}
 }
 
@@ -211,19 +250,30 @@ func (sc *ShardCtrler) apply() {
 
 		op := msg.Command.(Op)
 		if op.Type == "Join" {
-			sc.applyJoin(op.Data.(JoinArgs))
+			args := op.Data.(JoinArgs)
+			sc.applyJoin(&args)
 		} else if op.Type == "Leave" {
-			sc.applyLeave(op.Data.(LeaveArgs))
+			args := op.Data.(LeaveArgs)
+			sc.applyLeave(&args)
 		} else if op.Type == "Move" {
-			sc.applyMove(op.Data.(MoveArgs))
+			args := op.Data.(MoveArgs)
+			sc.applyMove(&args)
+		} else if op.Type == "Query" {
+			args := op.Data.(QueryArgs)
+			sc.applyQuery(&args)
 		}
-		// do nothing for query and other unsupported op
 
 		sc.mu.Lock()
-		sc.lastApplied += 1
-		sc.mu.Unlock()
+		sc.lastApplied = msg.CommandIndex
 		sc.lastAppliedCond.Broadcast()
+		sc.mu.Unlock()
 	}
+}
+
+func (sc *ShardCtrler) getLastResult(clientId int64) Result {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.lastResult[clientId]
 }
 
 // servers[] contains the ports of the set of
@@ -249,7 +299,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.lastApplied = 0
 	sc.lastAppliedCond = sync.NewCond(&sc.mu)
 
-	sc.duplicateTable = make(map[int64]int64)
+	sc.lastResult = map[int64]Result{}
 
 	go sc.apply()
 

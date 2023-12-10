@@ -31,7 +31,7 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-func (config *Config) clone() Config {
+func (config *Config) Clone() Config {
 	clone := Config{
 		Num:    config.Num + 1,
 		Shards: [NShards]int{},
@@ -127,22 +127,11 @@ const (
 
 type Err string
 
-type Args interface {
-	getClientId() int64
-	getSeq() int64
-}
+type Args interface{}
 
 type BaseArgs struct {
 	ClientId int64
 	Seq      int64
-}
-
-func (b *BaseArgs) getClientId() int64 {
-	return b.ClientId
-}
-
-func (b *BaseArgs) getSeq() int64 {
-	return b.Seq
 }
 
 type Reply interface {
