@@ -4,7 +4,10 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"sync"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -14,6 +17,7 @@ type Clerk struct {
 	clientId int64
 	seq      int64
 	leaderId int
+	mu       sync.Mutex
 }
 
 func nrand() int64 {
@@ -41,9 +45,8 @@ func (ck *Clerk) Query(num int) Config {
 		},
 		Num: num,
 	}
-	reply := QueryReply{}
-	ck.call("ShardCtrler.Query", &args, &reply)
-	return reply.Config
+	reply := ck.call("ShardCtrler.Query", "Query", &args)
+	return reply.(*QueryReply).Config
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
@@ -55,8 +58,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		},
 		Servers: servers,
 	}
-	reply := JoinReply{}
-	ck.call("ShardCtrler.Join", &args, &reply)
+	ck.call("ShardCtrler.Join", "Join", &args)
 }
 
 func (ck *Clerk) Leave(gids []int) {
@@ -68,8 +70,7 @@ func (ck *Clerk) Leave(gids []int) {
 		},
 		GIDs: gids,
 	}
-	reply := LeaveReply{}
-	ck.call("ShardCtrler.Leave", &args, &reply)
+	ck.call("ShardCtrler.Leave", "Leave", &args)
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
@@ -82,17 +83,20 @@ func (ck *Clerk) Move(shard int, gid int) {
 		Shard: shard,
 		GID:   gid,
 	}
-	reply := MoveReply{}
-	ck.call("ShardCtrler.Move", &args, &reply)
+	ck.call("ShardCtrler.Move", "Move", &args)
 }
 
-func (ck *Clerk) call(method string, args Args, reply Reply) {
+func (ck *Clerk) call(method, typeName string, args Args) Reply {
+	ck.mu.Lock()
+	leaderId := ck.leaderId
+	ck.mu.Unlock()
 	for {
+		reply := NewReply(typeName)
 		done := make(chan bool)
 
-		DPrintf("call %s[%d] start, args = %s\n", method, ck.leaderId, args)
+		DPrintf("call %s[%d] start, args = %s\n", method, leaderId, args)
 		go func() {
-			done <- ck.servers[ck.leaderId].Call(method, args, reply)
+			done <- ck.servers[leaderId].Call(method, args, reply)
 		}()
 
 		var ok bool
@@ -100,22 +104,25 @@ func (ck *Clerk) call(method string, args Args, reply Reply) {
 		case ok = <-done:
 		case <-time.After(time.Second):
 			// timeout, retry
-			DPrintf("call %s[%d] timeout, retry, args = %s\n", method, ck.leaderId, args)
+			DPrintf("call %s[%d] timeout, retry, args = %s\n", method, leaderId, args)
 			continue
 		}
 
 		if !ok || reply.getErr() == ErrWrongLeader {
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-			DPrintf("call %s[%d] !ok || ErrWrongLeader, retry\n", method, ck.leaderId)
+			leaderId = (leaderId + 1) % len(ck.servers)
+			DPrintf("call %s[%d] !ok || ErrWrongLeader, retry\n", method, leaderId)
 			continue
 		}
 
 		if reply.getErr() == ErrWrongTerm {
-			DPrintf("call %s[%d] ErrWrongTerm, retry\n", method, ck.leaderId)
+			DPrintf("call %s[%d] ErrWrongTerm, retry\n", method, leaderId)
 			continue
 		}
 
-		DPrintf("call %s[%d] success, reply = %s\n", method, ck.leaderId, reply)
-		return
+		DPrintf("call %s[%d] success, reply = %s\n", method, leaderId, reply)
+		ck.mu.Lock()
+		ck.leaderId = leaderId
+		ck.mu.Unlock()
+		return reply
 	}
 }

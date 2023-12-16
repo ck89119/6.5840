@@ -307,6 +307,7 @@ func TestConcurrent1(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	// config 1 [100 100 100 100 100 100 100 100 100 100]
 	cfg.join(0)
 
 	n := 10
@@ -337,10 +338,13 @@ func TestConcurrent1(t *testing.T) {
 	}
 
 	time.Sleep(150 * time.Millisecond)
+	// config 2 [101 101 101 101 101 100 100 100 100 100]
 	cfg.join(1)
 	time.Sleep(500 * time.Millisecond)
+	// config 3 [102 102 101 101 101 102 100 100 100 100]
 	cfg.join(2)
 	time.Sleep(500 * time.Millisecond)
+	// config 4 [102 102 101 101 101 102 102 101 102 101]
 	cfg.leave(0)
 
 	cfg.ShutdownGroup(0)
@@ -349,6 +353,7 @@ func TestConcurrent1(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	cfg.ShutdownGroup(2)
 
+	// config 5 [101 101 101 101 101 101 101 101 101 101]
 	cfg.leave(2)
 
 	time.Sleep(100 * time.Millisecond)
@@ -357,9 +362,12 @@ func TestConcurrent1(t *testing.T) {
 	cfg.StartGroup(2)
 
 	time.Sleep(100 * time.Millisecond)
+	// config 6 [100 100 100 100 100 101 101 101 101 101]
 	cfg.join(0)
+	// config 7 [100 100 100 100 100 100 100 100 100 100]
 	cfg.leave(1)
 	time.Sleep(500 * time.Millisecond)
+	// config 8 [101 101 101 101 101 100 100 100 100 100]
 	cfg.join(1)
 
 	time.Sleep(1 * time.Second)
@@ -457,6 +465,7 @@ func TestConcurrent3(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	// config 1 [100 100 100 100 100 100 100 100 100 100]
 	cfg.join(0)
 
 	n := 10
@@ -487,7 +496,9 @@ func TestConcurrent3(t *testing.T) {
 
 	t0 := time.Now()
 	for time.Since(t0) < 12*time.Second {
+		// config 4 * n + 2 [102 102 102 102 102 100 100 100 100 100] 18
 		cfg.join(2)
+		// config 4 * n + 3 [101 101 102 102 102 101 100 100 100 100] 19
 		cfg.join(1)
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 		cfg.ShutdownGroup(0)
@@ -498,7 +509,9 @@ func TestConcurrent3(t *testing.T) {
 		cfg.StartGroup(2)
 
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
+		// config 4 * n + 4 [102 102 102 102 102 100 100 100 100 100] 20
 		cfg.leave(1)
+		// config 4 * n + 5 [100 100 100 100 100 100 100 100 100 100] 21
 		cfg.leave(2)
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 	}
@@ -525,6 +538,7 @@ func TestUnreliable1(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	// config 1 [100 100 100 100 100 100 100 100 100 100]
 	cfg.join(0)
 
 	n := 10
@@ -536,8 +550,11 @@ func TestUnreliable1(t *testing.T) {
 		ck.Put(ka[i], va[i])
 	}
 
+	// config 2 [101 101 101 101 101 100 100 100 100 100]
 	cfg.join(1)
+	// config 3 [102 102 101 101 101 102 100 100 100 100]
 	cfg.join(2)
+	// config 4 [102 102 101 101 101 102 102 101 102 101]
 	cfg.leave(0)
 
 	for ii := 0; ii < n*2; ii++ {
@@ -548,7 +565,9 @@ func TestUnreliable1(t *testing.T) {
 		va[i] += x
 	}
 
+	// config 5
 	cfg.join(0)
+	// config 6
 	cfg.leave(1)
 
 	for ii := 0; ii < n*2; ii++ {

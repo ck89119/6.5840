@@ -32,18 +32,22 @@ type Config struct {
 }
 
 func (config *Config) Clone() Config {
-	clone := Config{
-		Num:    config.Num + 1,
-		Shards: [NShards]int{},
-		Groups: map[int][]string{},
-	}
-	for i := range config.Shards {
-		clone.Shards[i] = config.Shards[i]
-	}
-	for k, v := range config.Groups {
-		clone.Groups[k] = v
-	}
+	clone := Config{}
+	clone.CopyFrom(config)
 	return clone
+}
+
+func (config *Config) CopyFrom(c *Config) {
+	config.Num = c.Num
+
+	for i := range config.Shards {
+		config.Shards[i] = c.Shards[i]
+	}
+
+	config.Groups = map[int][]string{}
+	for k, v := range c.Groups {
+		config.Groups[k] = append([]string{}, v...)
+	}
 }
 
 func (config *Config) getMinMax() (minCnt, minGid, maxCnt, maxGid int) {
@@ -60,10 +64,7 @@ func (config *Config) getMinMax() (minCnt, minGid, maxCnt, maxGid int) {
 		}
 	}
 
-	minCnt = NShards
-	minGid = 0
-	maxCnt = 0
-	maxGid = 0
+	minCnt, minGid, maxCnt, maxGid = NShards, 0, 0, 0
 	for k, v := range cnt {
 		if k == InvalidGroup {
 			continue
@@ -214,6 +215,27 @@ type QueryReply struct {
 
 func (reply *QueryReply) String() string {
 	return fmt.Sprintf("{Err = %v, Config = %v}", reply.Err, reply.Config)
+}
+
+var _ Args = (*JoinArgs)(nil)
+var _ Args = (*LeaveArgs)(nil)
+var _ Args = (*MoveArgs)(nil)
+var _ Args = (*QueryArgs)(nil)
+var _ Reply = (*JoinReply)(nil)
+var _ Reply = (*LeaveReply)(nil)
+var _ Reply = (*MoveReply)(nil)
+var _ Reply = (*QueryReply)(nil)
+
+func NewReply(typeName string) Reply {
+	if typeName == "Join" {
+		return &JoinReply{}
+	} else if typeName == "Leave" {
+		return &LeaveReply{}
+	} else if typeName == "Move" {
+		return &MoveReply{}
+	} else {
+		return &QueryReply{}
+	}
 }
 
 func Max(a, b int) int {

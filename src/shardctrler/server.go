@@ -93,6 +93,7 @@ func (sc *ShardCtrler) applyJoin(args *JoinArgs) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	clone := sc.configs[len(sc.configs)-1].Clone()
+	clone.Num += 1
 	DPrintf("[%d] start applyJoin, clone finished\n", sc.me)
 	for gid, serverNames := range args.Servers {
 		DPrintf("[%d] start applyJoin, gid = %v, serverNames = %v\n", sc.me, gid, serverNames)
@@ -139,6 +140,7 @@ func (sc *ShardCtrler) applyLeave(args *LeaveArgs) {
 	defer sc.mu.Unlock()
 
 	clone := sc.configs[len(sc.configs)-1].Clone()
+	clone.Num += 1
 	for _, gid := range args.GIDs {
 		delete(clone.Groups, gid)
 	}
@@ -178,6 +180,7 @@ func (sc *ShardCtrler) applyMove(args *MoveArgs) {
 	defer sc.mu.Unlock()
 
 	clone := sc.configs[len(sc.configs)-1].Clone()
+	clone.Num += 1
 	clone.Shards[args.Shard] = args.GID
 	sc.configs = append(sc.configs, clone)
 
@@ -192,6 +195,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	if lastResult.Seq == args.Seq {
 		DPrintf("[%d] duplicate Query, args = %s\n", sc.me, args)
 		reply.Err = lastResult.Err
+		reply.Config.CopyFrom(&lastResult.Config)
 		return
 	}
 
@@ -203,7 +207,8 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 
 	reply.Err = err
 	if err == OK {
-		reply.Config = sc.getLastResult(args.ClientId).Config
+		lastResult = sc.getLastResult(args.ClientId)
+		reply.Config.CopyFrom(&lastResult.Config)
 	}
 }
 
@@ -217,7 +222,7 @@ func (sc *ShardCtrler) applyQuery(args *QueryArgs) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	if args.Num == -1 {
+	if args.Num == -1 || args.Num >= len(sc.configs) {
 		args.Num = len(sc.configs) - 1
 	}
 	sc.lastResult[args.ClientId] = Result{
